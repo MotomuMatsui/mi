@@ -1,53 +1,229 @@
-/********************************************\
-| Edge Perturbation Method v2.0 (2018/11/16) |
-|                                            |
-|  Copyright (c) 2015-2018 Motomu Matsui     |
-|      Distributed under the GNU GPL         |
-|                                            |
-|      Matsui M and Iwasaki W (2018)         |
-|      Systematic Biology, xx:xx-xx.         |
-|                                            |
-|      http://gs.bs.s.u-tokyo.ac.jp/         |
-\********************************************/
+/******************************************\
+| Graph Splitting Method v2.3 (2018/11/16) |
+|                                          |
+| Copyright (c) 2015-2018 Motomu Matsui    |
+|     Distributed under the GNU GPL        |
+|                                          |
+|     Matsui M and Iwasaki W (2018)        |
+|     Systematic Biology, xx:xx-xx.        |
+|                                          |
+|     http://gs.bs.s.u-tokyo.ac.jp/        |
+\******************************************/
+
+#include <algorithm>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <sstream>
+#include <string>
+#include <vector>
+#include <unordered_map>
 
 #include "format.h"
+#include "distance.h"
 
 using namespace std;
 
-int readMAT(ifstream& ifs, double* (&W), int& size){
-  
-  int x = 0; // x
-  size  = 0; // size of matrix
+// Parsing multiple fasta file
+int readFASTA(ifstream& ifs, ofstream& ofs1, ofstream& ofs2, int& row){
+
+  int info = 0;
+
+  //Input & Output
+  int id = 1;
+  int f1 = 0;
+  int f2 = 0;
+
+  string line;
+  while(getline(ifs, line)){
+    if(line[0] == '>'){
+      if(f1==1){
+	info = 1; //empty entry
+	break;
+      }
+      else{
+	auto name = line.substr(1);
+	ofs1 << id << "\t" << name << "\n";
+	ofs2 << '>' << id << "\n";
+	
+	id ++;
+	f1 = 1;
+	f2 = 1;
+      }
+    }
+    else{
+      if(f2==0){
+	info = 2; //empty entry (1st entry lacked ">")	
+	break;
+      }
+      else{
+	ofs2 << line << "\n";
+	f1 = 0;
+      }
+    }
+  }
+
+  // # of sequence (= row size of sequence similarity matrix)
+  row = id - 1;
+
+  ofs1.close();
+  ofs2.close();
+
+  if(f1==1){
+    info = 3; // empty entry (last entry lacked a sequence data)
+  }
+  else if(info==0 && row < 2){
+    info = 4; // more than two sequences are required
+  }
+
+  return info;
+}
+
+//////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////
+
+// Parsing mmseqs result file
+int PSA2mat(ifstream& ifs, double* (&W), double* (&M), int const& size, string const& deletion_method){
+
+  //File I/O
+  double* B = new double[size*size](); // bit score matrix
+  double* S = new double[size*size](); // sigma score matrix
+  double* L = new double[size*size](); // sequence length matrix
+          W = new double[size*size](); // Distance matrix
+          M = new double[size*size](); // Sequence similarity matrix
 
   //Reading lines
+  int x = 1; // Sequence IDs (query)
+  int y = 1; // Sequence IDs (target)
+  int paired = 0;
+  double bit = 0; // Bit scores calculated by MMseqs
+  double len = 0; // length calculated by MMseqs
   string line, chr;
-  int n = 0; // position
-  int same_sequence = 0;
+  string xs, ys;
+
+  regex head(R"(^>.+$)"); 
   while(getline(ifs, line)){
-    
-    if(x == 0){
+
+    if(regex_match(line, head)){ //header
       istringstream stream(line);
+      int pos = 0;
       while(getline(stream, chr, '\t')){
-	size ++;
-      }
-      W = new double[size*size](); // Sequence similarity matrix
+	if(pos == 0){
+	  x = stoi(chr.substr(1)) -1;
+	} 
+	else if(pos == 1){
+	  y = stoi(chr) -1;
+	}
+	else if(pos == 3){
+	  len = stoi(chr);
+	}
+	else if(pos == 11){
+	  bit = stod(chr);
+	}
+	pos ++;
+      }      
     }
+    else if(paired == 0){
+      xs = line;
+      paired = 1;
+    }
+    else{
+      ys = line;
+      paired = 0;
 
-    //Split lines
-    istringstream stream(line);
-    while(getline(stream, chr, '\t')){
-      auto d = stod(chr);
-      W[n] = d;
-      n++;
+      auto score = sum_score(xs, ys, deletion_method);
+      auto p = x*size+y;
+      auto s = S[p];
+      auto l = L[p];
+      auto b = B[p];
+      S[p] = s>score? s:score;
+      L[p] = l>len?   l:len;
+      B[p] = b>bit?   b:bit;
+    }
+  }  
 
-      if(d==0){
+  for(int x = 0; x < size; x ++){
+    for(int y = x+1; y < size; y ++){
+      auto xy = S[x*size+y];
+      auto yx = S[y*size+x];      
+      auto xx = S[x*size+x];
+      auto yy = S[y*size+y];
+
+      auto lxy = L[x*size+y];
+      auto lyx = L[y*size+x];
+      auto lxx = L[x*size+x];
+      auto lyy = L[y*size+y];      
+
+      auto sd  = scoredist2(xx, yy, xy, yx, lxx, lyy, lxy, lyx);
+      
+      W[x*size+y] = sd;
+      W[y*size+x] = sd;
+    }
+    W[x*size+x] = 0;
+  }
+
+  int same_sequence = 0;
+
+  for(int x = 0; x < size; x ++){
+    for(int y = x+1; y < size; y ++){
+      auto xy = B[x*size+y];
+      auto yx = B[y*size+x];      
+      auto xx = B[x*size+x];
+      auto yy = B[y*size+y];
+      
+      auto comp = xy>yx?  xy:yx;
+      auto self = xx>yy?  xx:yy;
+      auto sss  = self>0? comp/self:0;
+
+      M[x*size+y] = sss;
+      M[y*size+x] = sss;
+      
+      if(sss==1){
         same_sequence++;
       }
     }
-    x = 1;
+    M[x*size+x] = 1;
+  }
+
+  return same_sequence;
+}
+
+//////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////
+
+// Parsing mafft result file
+int MSA2mat(ifstream& ifs, double* (&W), int const& size, string const& deletion_method){
+
+  //File I/O
+  auto S = new string[size]();      // sigma score matrix
+       W = new double[size*size](); // Distance matrix
+
+  //Reading lines
+  int x = 1; // Sequence IDs (query)
+  string line;
+
+  regex head(R"(^>.+$)"); 
+  while(getline(ifs, line)){
+
+    if(regex_match(line, head)){ //header
+      x = stoi(line.substr(1)) -1;
+    }
+    else{
+      S[x] += line;
+    }
   }  
-  
-  return (same_sequence-size)/2;
+
+  for(int x = 0; x < size; x ++){
+    for(int y = x+1; y < size; y ++){
+      auto dis = scoredist(S[x], S[y], deletion_method);
+      
+      W[x*size+y] = dis;
+      W[y*size+x] = dis;
+    }
+    W[x*size+x] = 0;
+  }
+
+  return 0;
 }
 
 //////////////////////////////////////////////////////////////////
@@ -67,9 +243,9 @@ void sc2nwk(int* const& W, string& newick, int const& size){
     for(int c=0; c<size; c++){
       cur = W[r*size+c];
       if(cur != old){
-        change[c*3]   = old; // previous membership
-        change[c*3+1] = cur; // current membership
-        change[c*3+2] ++;    // # of cluster member
+	change[c*3]   = old; // previous membership
+	change[c*3+1] = cur; // current membership
+	change[c*3+2] ++;    // # of cluster member
       }
       old = cur;
     }
@@ -158,36 +334,36 @@ void addEP(string const& newick, string& newick_EP, unordered_map<string, double
     else if(p == ')'){
 
       if(id.size() > 0){
-        for(int depth=1; depth<=B; depth++){
-          clade[depth].push_back(stoi(id));
-        }
-        id = "";
+	for(int depth=1; depth<=B; depth++){
+	  clade[depth].push_back(stoi(id));
+	}
+	id = "";
       }
 
       ss.str("");
       sort(clade[B].begin(), clade[B].end());
       for(int n : clade[B]){
-        ss << n << "|"; 
+	ss << n << "|";	
       }
 
       string const C = ss.str();
 
       if(B>2){
-        ss_EP << fixed << setprecision(2) << ep[C]/ep_num;
+	ss_EP << fixed << setprecision(2) << ep[C]/ep_num;
       }
       else if(B==2 && f==1){
-        int count  = 0;
-        size_t pos = 0;
-        while((pos = C.find("|", pos)) != string::npos){
-          count ++;
-          pos++;
-        }
+	int count  = 0;
+	size_t pos = 0;
+	while((pos = C.find("|", pos)) != string::npos){
+	  count ++;
+	  pos++;
+	}
 
-        if(count < size-1){
-          ss_EP << fixed << setprecision(2) << ep[C]/ep_num;
-        }
+	if(count < size-1){
+	  ss_EP << fixed << setprecision(2) << ep[C]/ep_num;
+	}
 
-        f=0;
+	f=0;
       }
  
       clade[B] = {};
@@ -195,10 +371,10 @@ void addEP(string const& newick, string& newick_EP, unordered_map<string, double
     }
     else if(p == ','){
       if(id.size() > 0){
-        for(int depth=1; depth<=B; depth++){
-          clade[depth].push_back(stoi(id));
-        }
-        id = "";
+	for(int depth=1; depth<=B; depth++){
+	  clade[depth].push_back(stoi(id));
+	}
+	id = "";
       }
     }
     else{
@@ -232,7 +408,7 @@ void addLABEL(string const& newick, string& newick_ann, string const& annotation
       } 
       else if(pos == 1){
         ann = string(chr);
-        break;
+	break;
       }
       pos ++;
     }
@@ -256,16 +432,16 @@ void addLABEL(string const& newick, string& newick_ann, string const& annotation
     }
     else if(p == ')'){
       if(id.size() > 0){
-        ss_ann << '"' << L[stoi(id)-1] << '"';
-        id = "";
+	ss_ann << '"' << L[stoi(id)-1] << '"';
+	id = "";
       }
       ss_ann << p;
       s = 0;
     }
     else if(p == ','){
       if(id.size() > 0){
-        ss_ann << '"' << L[stoi(id)-1] << '"';
-        id = "";
+	ss_ann << '"' << L[stoi(id)-1] << '"';
+	id = "";
       }
       ss_ann << p;
       s = 1;
@@ -284,7 +460,7 @@ void addLABEL(string const& newick, string& newick_ann, string const& annotation
 //////////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////
 
-void sc2list(int* const& nj, int* (&list), int const& size){
+void sc2list(int* const& gs, int* (&list), int const& size){
 
   list = new int[(size-3)*size]();
 
@@ -297,18 +473,18 @@ void sc2list(int* const& nj, int* (&list), int const& size){
     vector<int> b;
     
     for(int j=0; j<size; j++){
-      if(nj[i+j*size] == m){
-	flag = nj[i+j*size-1];
-	break;
+      if(gs[i+j*size] == m){
+        flag = gs[i+j*size-1];
+        break;
       }
     }
 
     for(int j=0; j<size; j++){
-      if(nj[i+j*size] == m){
-	a.push_back(j);
+      if(gs[i+j*size] == m){
+        a.push_back(j);
       }
-      else if(nj[i+j*size] == flag){
-	b.push_back(j);
+      else if(gs[i+j*size] == flag){
+        b.push_back(j);
       }
     }
 
@@ -319,7 +495,7 @@ void sc2list(int* const& nj, int* (&list), int const& size){
 
     if(a_size>1){
       for(int n : a){
-	list[l*size+n]=1;
+        list[l*size+n]=1;
       }
       l ++;
     }
@@ -328,12 +504,26 @@ void sc2list(int* const& nj, int* (&list), int const& size){
 
     if(b_size>1){
       for(int n : b){
-	list[l*size+n]=1;
+        list[l*size+n]=1;
       }
       l ++;
     }
   }
 }
+
+//////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////
+
+void mix(double* const& Wp, double* const& Wm, double* (&Wpm), double const& wp, int const& size){
+
+  double wm = 1-wp;
   
-//////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////
+  Wpm = new double[size*size](); // Distance matrix
+
+  for(int x=0; x<size; x++){
+    for(int y=0; y<size; y++){
+      auto p = x*size+y;
+      Wpm[p] = wp*Wp[p] + wm*Wm[p];
+    }
+  }
+}
