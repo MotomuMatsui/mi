@@ -21,13 +21,17 @@ OBJECTS += format.o
 OBJECTS += mmseqs.o
 OBJECTS += mafft.o
 OBJECTS += nj.o
+OBJECTS += ep.o
+OBJECTS += ep_function.o
 OBJECTS += transitivity.o
+OBJECTS += messages.o
 
 FILE  := lapack-3.7.1/make.inc
 EXIST := $(shell ls | grep ${FILE})
 
 .PHONY: all
-all: mafft mmseqs lapack mi clean
+#all: mafft mmseqs lapack mi clean
+all: mi clean
 
 .PHONY: mafft
 mafft:
